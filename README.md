@@ -16,5 +16,5 @@ python make_slided_train_data.py
 
 ### youtube
 #### Tamiya TT-02 DonkeyCar Drift Test2
-[![Drift Test2](http://img.youtube.com/vi/iSLTgYGxONg/default.jpg)](https://studio.youtube.com/video/iSLTgYGxONg)
+[![Drift Test2](http://img.youtube.com/vi/iSLTgYGxONg/default.jpg)](https://www.youtube.com/watch?v=iSLTgYGxONg)
 
