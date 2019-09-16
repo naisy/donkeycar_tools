@@ -153,6 +153,13 @@ class DonkeyFrameSlider():
         stream         = [] # record array
         stream_fifo    = [] # temp array. from dataset
         stream_filo    = [] # temp array. from stream
+        PKT_RECORD     = 0
+        PKT_DIR        = 1
+        PKT_FILE       = 2
+        PKT_MS         = 3
+        PKT_DIFF       = 4
+        PKT_UPDATED    = 5
+        PKT_ITR        = 6
         ITR_NONE       = 0
         ITR_FAR        = 1
         ITR_NEAR       = 2
@@ -186,23 +193,23 @@ class DonkeyFrameSlider():
                         record = self.readJson(file_path)
                         ms = record["milliseconds"]
                         diff_ms = None
-                        is_update = False
+                        is_updated = False
                         itr_flag = ITR_NONE
-                        pickup_target = (record, dir_path[5:], file_name, ms, diff_ms, is_update, itr_flag)
+                        pickup_target = (record, dir_path[5:], file_name, ms, diff_ms, is_updated, itr_flag)
                     else:
                         pickup_target = stream.pop(0)
                 # here, pickup_target is exist
 
                 # ITR_FAR
-                pickup_target = tupleUpdate(pickup_target, 6, ITR_FAR)
+                pickup_target = tupleUpdate(pickup_target, PKT_ITR, ITR_FAR)
                 while(pickup_target[6] == ITR_FAR):
                     if file_number == 0:
                         if len(stream) == 0:
                             file_number -= 1
-                            pickup_target = tupleUpdate(pickup_target, 6, ITR_NEAR)
+                            pickup_target = tupleUpdate(pickup_target, PKT_ITR, ITR_NEAR)
                             break
                         else:
-                            pickup_target = tupleUpdate(pickup_target, 6, ITR_NEAR)
+                            pickup_target = tupleUpdate(pickup_target, PKT_ITR, ITR_NEAR)
                             break
                     else:
                         file_name = "record_{}.json".format(file_number)
@@ -211,21 +218,21 @@ class DonkeyFrameSlider():
                         if not os.path.exists(file_path):
                             print("Not found: {} - skip".format(file_path))
                             # dataset is empty. read next file
-                            pickup_target = tupleUpdate(pickup_target, 6, ITR_FAR)
+                            pickup_target = tupleUpdate(pickup_target, PKT_ITR, ITR_FAR)
                             break
                         # dataset is exist
                         record = self.readJson(file_path)
                         ms = record["milliseconds"]
                         diff_ms = None
-                        is_update = False
+                        is_updated = False
                         itr_flag = ITR_NONE
-                        packet = (record, dir_path[5:], file_name, ms, diff_ms, is_update, itr_flag)
+                        packet = (record, dir_path[5:], file_name, ms, diff_ms, is_updated, itr_flag)
 
                     print("{} {} ITR_FAR".format(dir_number, file_number))
                     diff = pickup_target[3] - packet[3]
                     diff_slide_ms = abs(self.slide_ms - (pickup_target[3] - packet[3]))
                     if diff <= 0:
-                        pickup_target = tupleUpdate(pickup_target, 6, ITR_NEAR)
+                        pickup_target = tupleUpdate(pickup_target, PKT_ITR, ITR_NEAR)
                         stream_fifo += [packet]
                         print("BROKEN DATA")
                         break
@@ -233,65 +240,65 @@ class DonkeyFrameSlider():
                         stream_fifo += [packet]
                         continue
                     if diff > self.slide_ms*1.5:
-                        pickup_target = tupleUpdate(pickup_target, 6, ITR_NEAR)
+                        pickup_target = tupleUpdate(pickup_target, PKT_ITR, ITR_NEAR)
                         stream_fifo += [packet]
                         break
                     # diff is ok
-                    if not pickup_target[5]: # pickup_target is_update == False
+                    if not pickup_target[5]: # pickup_target is_updated == False
                         pickup_target = tupleImageUpdate(pickup_target, packet[0]["cam/image_array"])
-                        pickup_target = tupleUpdate(pickup_target, 4, pickup_target[3] - packet[3])
-                        pickup_target = tupleUpdate(pickup_target, 5, True)
+                        pickup_target = tupleUpdate(pickup_target, PKT_DIFF, pickup_target[3] - packet[3])
+                        pickup_target = tupleUpdate(pickup_target, PKT_UPDATED, True)
                         stream_fifo += [packet]
                         continue
-                    # pickup_target is_update == True
+                    # pickup_target is_updated == True
                     if abs(self.slide_ms - abs(pickup_target[4])) < diff_slide_ms:
-                        pickup_target = tupleUpdate(pickup_target, 6, ITR_NEAR)
+                        pickup_target = tupleUpdate(pickup_target, PKT_ITR, ITR_NEAR)
                         stream_fifo += [packet]
                         break
                     # pickup_target needs update
                     pickup_target = tupleImageUpdate(pickup_target, packet[0]["cam/image_array"])
-                    pickup_target = tupleUpdate(pickup_target, 4, pickup_target[3] - packet[3])
-                    pickup_target = tupleUpdate(pickup_target, 5, True)
+                    pickup_target = tupleUpdate(pickup_target, PKT_DIFF, pickup_target[3] - packet[3])
+                    pickup_target = tupleUpdate(pickup_target, PKT_UPDATED, True)
                     stream_fifo += [packet]
 
                 # ITR_NEAR
                 while(pickup_target[6] == ITR_NEAR):
                     print("{} {} ITR_NEAR".format(dir_number, file_number))
                     if len(stream) == 0:
-                        pickup_target = tupleUpdate(pickup_target, 6, ITR_STOP)
+                        pickup_target = tupleUpdate(pickup_target, PKT_ITR, ITR_STOP)
                         break
                     # stream exists
                     packet = stream.pop()
                     diff = pickup_target[3] - packet[3]
                     diff_slide_ms = abs(self.slide_ms - (pickup_target[3] - packet[3]))
                     if diff <= 0:
-                        pickup_target = tupleUpdate(pickup_target, 6, ITR_STOP)
+                        pickup_target = tupleUpdate(pickup_target, PKT_ITR, ITR_STOP)
                         stream_fifo += [packet]
                         print("BROKEN DATA")
                         break
                     if diff < self.slide_ms/2:
-                        pickup_target = tupleUpdate(pickup_target, 6, ITR_STOP)
+                        pickup_target = tupleUpdate(pickup_target, PKT_ITR, ITR_STOP)
                         stream_filo += [packet]
                         break
                     if diff > self.slide_ms*1.5:
                         stream_filo += [packet]
                         continue
                     # diff is ok
-                    if not pickup_target[5]: # pickup_target is_update == False
+                    if not pickup_target[5]: # pickup_target is_updated == False
                         pickup_target = tupleImageUpdate(pickup_target, packet[0]["cam/image_array"])
-                        pickup_target = tupleUpdate(pickup_target, 4, pickup_target[3] - packet[3])
-                        pickup_target = tupleUpdate(pickup_target, 5, True)
+                        pickup_target = tupleUpdate(pickup_target, PKT_DIFF, pickup_target[3] - packet[3])
+                        pickup_target = tupleUpdate(pickup_target, PKT_UPDATED, True)
                         stream_filo += [packet]
                         continue
-                    # pickup_target is_update == True
+                    # pickup_target is_updated == True
                     if abs(self.slide_ms - abs(pickup_target[4])) < diff_slide_ms:
-                        pickup_target = tupleUpdate(pickup_target, 6, ITR_STOP)
+                        pickup_target = tupleUpdate(pickup_target, PKT_ITR, ITR_STOP)
                         stream_filo += [packet]
                         break
                     # pickup_target needs update
                     pickup_target = tupleImageUpdate(pickup_target, packet[0]["cam/image_array"])
-                    pickup_target = tupleUpdate(pickup_target, 4, pickup_target[3] - packet[3])
-                    pickup_target = tupleUpdate(pickup_target, 5, True)
+                    pickup_target = tupleUpdate(pickup_target, PKT_DIFF, pickup_target[3] - packet[3])
+                    pickup_target = tupleUpdate(pickup_target, PKT_UPDATED, True)
                     stream_filo += [packet]
 
                 # end
@@ -356,4 +363,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
