@@ -315,8 +315,8 @@ class DonkeyFrameSlider():
                         copyfile(src, dst)
                         is_meta_copuy = True
                     # image copy
-                    src = os.path.join(src_dir_path, packet[0]["cam/image_array"])
-                    dst = os.path.join(dst_dir_path, packet[0]["cam/image_array"])
+                    src = os.path.join(src_dir_path, pickup_target[0]["cam/image_array"])
+                    dst = os.path.join(dst_dir_path, pickup_target[0]["cam/image_array"])
                     copyfile(src, dst)
 
                     print("{} {} file write {} {} {}".format(dir_number, file_number, pickup_target[2], pickup_target[3], pickup_target[4]))
