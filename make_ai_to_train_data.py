@@ -1,25 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-FILE:
-  make_slided_train_data.py
-
-CREATER:
-  naisy (https://github.com/naisy/
-
-SUMMARY:
-  Compared to real time, computer processing is always delayed. Especially, deeplearning takes time for camera processing and prediction processing. Even when the camera works at 120 fps, there is 8.3 ms delay. For 21 fps there is 47.6 ms delay. If prediction is 20 fps, the delay will be added by 50 ms. If frame resize is included, the delay will exceed 100 ms.
-
-  The distance that a 10 km/h (= 2.77 m/s) car body moves to 100 ms is 27.7 cm. The total length of 1/10 RC is about 40 cm, and the total width is about 19 cm. Even if perfect drift data is prepared on a narrow road, it is impossible to drift without crashing if a delay of 100 ms occurs.
-
-  Therefore, prepare the data by intentionally shifting the frame. This is the source code.
-
-  リアルタイムと比べると、コンピュータ処理はいつも遅延します。特にディープラーニングではカメラ処理と予測処理に時間がかかります。120fpsで動作するカメラでも8.3msの遅延があります。21fpsのカメラでは47.6msの遅延になります。予測が20fpsで動作する時はさらに50msの遅延が追加されることになります。フレームのリサイズ処理を含めると、総遅延は100msを超えることになります。
-
-  10km/h(=2.77m/s)の車体が100msに移動する距離は、27.7cmです。1/10 RCの全長は約40cm、全幅は約19cmです。道幅の狭い道路で完璧なドリフトデータを用意しても、100msの遅延が発生するとクラッシュせずにドリフト走行することは不可能です。
-
-  そこで、意図的にフレームをずらしてデータを用意します。これはそのソースコードになります。
-
 LICENSE:
 MIT License
 
@@ -135,7 +116,7 @@ class DonkeyElementChanger():
             os.makedirs(path)
         return
 
-    def change(self, st_rate=1.0, th_rate=1.0):
+    def change(self):
         dir_number     = 0
         file_number    = 0
         is_meta_copy   = False
@@ -161,14 +142,12 @@ class DonkeyElementChanger():
                     continue
                 # dataset is exist
                 record = self.readJson(file_path)
-                if 'user/angle' in record and record["user/angle"] != 0.0:
-                    record["user/angle"] = record["pilot/angle"] * (1.0 - st_rate) + record["user/angle"] * st_rate
+
+                record["user/angle"] = record["user/angle"]
+                if "pilot/throttle" in record:
+                    record["user/throttle"] = record["user/throttle"] + record["pilot/throttle"]
                 else:
-                    record["user/angle"] = record["pilot/angle"]
-                if 'user/throttle' in record and record["user/throttle"] != 0.0:
-                    record["user/throttle"] = record["pilot/throttle"] * (1.0 - st_rate) + record["user/throttle"] * st_rate
-                else:
-                    record["user/throttle"] = record["pilot/throttle"]
+                    record["user/throttle"] = record["user/throttle"]
 
                 if record["user/angle"] > 1.0:
                     record["user/angle"] = 1.0
@@ -179,8 +158,10 @@ class DonkeyElementChanger():
                 elif record["user/throttle"] < -1.0:
                     record["user/throttle"] = -1.0
 
-                del record["pilot/angle"]
-                del record["pilot/throttle"]
+                if "pilot/angle" in record:
+                    del record["pilot/angle"]
+                if "pilot/throttle" in record:
+                    del record["pilot/throttle"]
 
                 self.mkdir(dst_dir_path)
                 self.writeJson(record, os.path.join(dst_dir_path, file_name))
@@ -213,13 +194,10 @@ class DonkeyElementChanger():
                 json.dump(json_data, f)
 
 def main():
-    USER_STEERING_ASSIST_RATE = 1.0
-    USER_THROTTLE_ASSIST_RATE = 1.0
-
     data_list_builder= DataListBuilder(src_dir_path='data')
     data_list = data_list_builder.getDataList()
     donkey_element_changer = DonkeyElementChanger(data_list=data_list, dst_dir_path='data_ai')
-    donkey_element_changer.change(st_rate=USER_STEERING_ASSIST_RATE, th_rate=USER_THROTTLE_ASSIST_RATE)
+    donkey_element_changer.change()
     return
 
 if __name__ == '__main__':
