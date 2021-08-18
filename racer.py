@@ -1,7 +1,8 @@
 """
-TensorRT Racer for the DonkeyCar Virtual Race.
+Overview:
+    TensorRT Racer for the DonkeyCar Virtual Race.
 Usage:
-    python racer.py (--host=<ip_address>) (--name=<car_name>) (--model=<model_path>) (--delay=<seconds>)
+    racer.py (--host=<ip_address>) (--name=<car_name>) (--model=<model_path>) (--delay=<seconds>)
 Example:
     python racer.py --host=127.0.0.1 --name=naisy --model=linear.engine --delay=0.1
 
