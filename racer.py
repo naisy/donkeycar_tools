@@ -28,6 +28,7 @@ import tensorrt as trt
 import pycuda.driver as cuda
 import pycuda.autoinit
 from collections import namedtuple
+import traceback
 
 HostDeviceMemory = namedtuple('HostDeviceMemory', 'host_memory device_memory')
 TRT8 = 8
@@ -36,14 +37,20 @@ TRT_LOGGER = trt.Logger()
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.NOTSET)  # NOTSET:0, DEBUG:10, INFO:20, WARNING:30, ERROR:40, CRITICAL:50
 
+
 class RaceClient:
-    def __init__(self, host, port, model_path, delay, car_conf, scene_conf, cam_conf, socket_read_hz=20):
+
+    def __init__(self, host, port, model_path, delay, car_conf, scene_conf, cam_conf, socket_read_hz=20, name='naisy'):
         self.msg = None
         self.poll_socket_sleep_sec = 1.0/socket_read_hz
         self.car_conf = car_conf
         self.scene_conf = scene_conf
         self.cam_conf = cam_conf
         self.delay = float(delay)
+        self.name = name
+        self.lock = threading.Lock()
+        self.count = 0
+        self.delay_waiting = False
 
         # the aborted flag will be set when we have detected a problem with the socket
         # that we can't recover from.
@@ -59,8 +66,10 @@ class RaceClient:
         self.queue_size_limit = 10
 
         self.recv_queue = Queue.Queue(maxsize=self.queue_size_limit)
+        self.wait_send_queue = Queue.Queue(maxsize=self.queue_size_limit)
         self.send_queue = Queue.Queue(maxsize=self.queue_size_limit)
         self.image_queue = Queue.Queue(maxsize=self.queue_size_limit)
+        
 
         self.model = TRTModel(model_path=model_path)
 
@@ -92,6 +101,9 @@ class RaceClient:
         while not self.image_queue.empty():
             q = self.image_queue.get(block=False)
             self.image_queue.task_done()
+        while not self.wait_send_queue.empty():
+            q = self.wait_send_queue.get(block=False)
+            self.wait_send_queue.task_done()
         while not self.send_queue.empty():
             q = self.send_queue.get(block=False)
             self.send_queue.task_done()
@@ -171,18 +183,35 @@ class RaceClient:
                                 if partial[0][0] == "{":
                                     assembled_packet = "".join(partial)
                                     assembled_packet = self.replace_float_notation(assembled_packet)
-                                    j = json.loads(assembled_packet)
+                                    try:
+                                        j = json.loads(assembled_packet)
+                                    except:
+                                        traceback.print_exc()
+                                        print(partial)
+                                        print("######## skip broken packets ########")
+                                        partial = []
+                                        continue
                                     self.on_msg_recv(j)
                                 else:
                                     print("failed packet.")
                                 partial.clear()
 
                 for s in writable:
+                    now = time.time()
                     while not self.send_queue.empty():
                         q = self.send_queue.get(block=False)
-                        print("sending", q)
-                        s.sendall(q.encode("utf-8"))
-                        self.send_queue.task_done()
+                        if now - q['time'] >= q['delay']:
+                            print("sending", q['data'])
+                            s.sendall(q['data'].encode("utf-8"))
+                            self.send_queue.task_done()
+                        else:
+                            self.wait_send_queue.put(q)
+                    while not self.wait_send_queue.empty():
+                        q = self.wait_send_queue.get(block=False)
+                        # back to the send_queue
+                        self.send_queue.put(q)
+                        self.wait_send_queue.task_done()
+
                 if len(exceptional) > 0:
                     print("problems w sockets!")
 
@@ -197,14 +226,14 @@ class RaceClient:
             # load scene
             self.scene_config_to_send_queue()
 
-        if msg['msg_type'] == "car_loaded":
+        elif msg['msg_type'] == "car_loaded":
             logger.debug("car_loaded")
             self.car_loaded = True
 
             self.cam_config_to_send_queue()
             self.car_config_to_send_queue()
         
-        if msg['msg_type'] == "telemetry":
+        elif msg['msg_type'] == "telemetry":
             imgString = msg["image"]
             ### to RGB
             image = Image.open(BytesIO(base64.b64decode(imgString)))
@@ -239,26 +268,96 @@ class RaceClient:
             #cv2.imshow("frame", image)
             #cv2.waitKey(1)
             ### send control to simulator
-            if self.image_queue.empty():
+            self.lock.acquire()
+            if not self.image_queue.empty():
+                self.image_queue.get(block=False)
+                self.image_queue.task_done()
                 self.image_queue.put(image)
+                print("drop old image")
+            else:
+                self.image_queue.put(image)
+            self.lock.release()
+        elif msg['msg_type'] == "cross_start":
+            print(f'cross_start: {msg}')
+            return
+
 
     def run_model(self):
-        while not self.image_queue.empty():
+        if not self.image_queue.empty():
+            print(f'empty count: {self.count}')
+            self.count = 0
+            self.lock.acquire()
             x = self.image_queue.get(block=False)
+            self.lock.release()
             x = self.model.preprocess(x)
             [throttle, steering] = self.model.infer(x)
-            if self.delay > 0:
-                time.sleep(self.delay) # add delay
-            self.controls_to_send_queue(steering[0], throttle[0])
+            self.image_queue.task_done()
+
+            if throttle[0] > 0.95:
+                throttle[0] = 1.0
+            elif throttle[0] < 0:
+                throttle[0] = -1.0
+
+            # body color change
+            color = self.color_make(throttle[0])
+            name = f'{self.name} {throttle[0]:0.2f}'
+            car_conf = {"body_style" : "donkey",
+                        "body_rgb" : color,
+                        "car_name" : name,
+                        "font_size" : 75}
+
+            self.car_config_to_send_queue(conf=car_conf, delay=self.delay)
+            self.controls_to_send_queue(steering[0], throttle[0], delay=self.delay)
+        else:
+            self.count += 1
+
+    def color_make(self,value):
+        """
+        Rainbow color maker.
+        value: -1.0 to 1.0
+        abs(value) 0.0: blue
+        abs(value) 0.5: green
+        abs(value) 1.0: red
+        """
+        value = abs(value)
+        if value > 1:
+            value = 1
+
+        c = int(255*value)
+        c1 = int(255*(value*2-0.5))
+        c05 = int(255*value*2)
+        if c > 255:
+            c = 255
+        elif c < 0:
+            c = 0
+        if c1 > 255:
+            c1 = 255
+        elif c1 < 0:
+            c1 = 0
+        if c05 > 255:
+            c05 = 255
+        elif c05 < 0:
+            c05 = 0
+
+        if 0 <= value and value < 0.5:
+            color = (0,c05,255-c05) # blue -> green
+        elif 0.5 <= value and value <= 1.0:
+            color = (c1,c05-c1,0) # green -> red
+        elif 1.0 < value:
+            color = (255,0,0) # red
+
+        return color
+
 
     def scene_config_to_send_queue(self, conf=None):
         logger.debug("scene_config_to_send_queue")
         if conf is None:
             conf = self.scene_conf
         msg = json.dumps(conf)
-        self.send_queue.put(msg)
+        q = {'data':msg, 'time':time.time(), 'delay': 0.0}
+        self.send_queue.put(q)
 
-    def car_config_to_send_queue(self, conf=None):
+    def car_config_to_send_queue(self, conf=None, delay=0.0):
         logger.debug("car_config_to_send_queue")
         if conf is None:
             conf = self.car_conf
@@ -271,7 +370,8 @@ class RaceClient:
                    'car_name': conf["car_name"],
                    'font_size' : str(conf["font_size"])}
             msg = json.dumps(msg)
-            self.send_queue.put(msg)
+            q = {'data':msg, 'time':time.time(), 'delay': delay}
+            self.send_queue.put(q)
 
     def cam_config_to_send_queue(self, conf=None):
         logger.debug("cam_config_to_send_queue")
@@ -303,16 +403,18 @@ class RaceClient:
                "rot_y" : str(conf["rot_y"]),
                "rot_z" : str(conf["rot_z"])}
         msg = json.dumps(msg)
-        self.send_queue.put(msg)
+        q = {'data':msg, 'time':time.time(), 'delay': 0.0}
+        self.send_queue.put(q)
 
-    def controls_to_send_queue(self, steering, throttle):
+    def controls_to_send_queue(self, steering, throttle, delay=0.0):
         logger.debug("controls_to_send_queue: {steering}, {throttle}")
         p = {"msg_type" : "control",
              "steering" : steering.__str__(),
              "throttle" : throttle.__str__(),
              "brake" : "0.0"}
         msg = json.dumps(p)
-        self.send_queue.put(msg)
+        q = {'data':msg, 'time':time.time(), 'delay': delay}
+        self.send_queue.put(q)
 
 
 class TRTModel():
@@ -425,7 +527,7 @@ def main(host, name, model_path, delay):
     # Create client
     PORT = 9091
     SOCKET_READ_HZ = 1000 # read socket hz
-    client = RaceClient(host=host, port=PORT, model_path=model_path, delay=delay, car_conf=car_conf, scene_conf=scene_conf, cam_conf=cam_conf, socket_read_hz=SOCKET_READ_HZ)
+    client = RaceClient(host=host, port=PORT, model_path=model_path, delay=delay, car_conf=car_conf, scene_conf=scene_conf, cam_conf=cam_conf, socket_read_hz=SOCKET_READ_HZ, name=name)
     try:
         while True:
             client.run_model()
@@ -433,7 +535,6 @@ def main(host, name, model_path, delay):
     except KeyboardInterrupt:
         pass
     except:
-        import traceback
         traceback.print_exc()
         print("racer error!:")
     finally:
