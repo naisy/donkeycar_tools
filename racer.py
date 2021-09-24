@@ -1,10 +1,14 @@
 """
 Overview:
-    TensorRT Racer for the DonkeyCar Virtual Race.
+    TensorRT/Tensorflow/Tensorflow Lite Racer for the DonkeyCar Virtual Race.
 Usage:
     racer.py (--host=<ip_address>) (--name=<car_name>) (--model=<model_path>) (--delay=<seconds>)
 Example:
-    python racer.py --host=127.0.0.1 --name=naisy --model=linear.engine --delay=0.1
+    python racer.py --host=127.0.0.1 --name=naisy --model=linear.engine --delay=0.2
+Supported models:
+    TensorRT 8:       linear.engine
+    Tensorflow:       linear.h5
+    Tensorflow Lite:  linear.tflite
 
 Options:
     -h --help        Show this screen.
@@ -47,10 +51,22 @@ class RaceClient:
         self.scene_conf = scene_conf
         self.cam_conf = cam_conf
         self.delay = float(delay)
+        self.accumulated_delay = 0.0
+        self.last_interval = 0.0
+        self.simulator_timing_ok = False
         self.name = name
         self.lock = threading.Lock()
         self.count = 0
         self.delay_waiting = False
+        self.lap_start_time = None
+        self.lap_first_start_time = 0
+        self.lap_end_time = 0
+        self.last_lap_time = None
+        self.best_lap_time = None
+        self.lap_time_queue = Queue.Queue(maxsize=400)
+        self.lap_counter = 0
+
+        
 
         # the aborted flag will be set when we have detected a problem with the socket
         # that we can't recover from.
@@ -70,8 +86,12 @@ class RaceClient:
         self.send_queue = Queue.Queue(maxsize=self.queue_size_limit)
         self.image_queue = Queue.Queue(maxsize=self.queue_size_limit)
         
-
-        self.model = TRTModel(model_path=model_path)
+        if model_path.endswith('.engine'):
+            self.model = TRTModel(model_path=model_path)
+        elif model_path.endswith('.h5'):
+            self.model = TFModel(model_path=model_path)
+        elif model_path.endswith('.tflite'):
+            self.model = TFLiteModel(model_path=model_path)
 
         # connect to unity simulator
         self.connect(host, port)
@@ -110,6 +130,10 @@ class RaceClient:
         while not self.recv_queue.empty():
             q = self.recv_queue.get(block=False)
             self.recv_queue.task_done()
+        while not self.lap_time_queue.empty():
+            q = self.lap_time_queue.get(block=False)
+            print(q)
+            self.lap_time_queue.task_done()
 
 
     def replace_float_notation(self, string):
@@ -186,6 +210,10 @@ class RaceClient:
                                     try:
                                         j = json.loads(assembled_packet)
                                     except:
+                                        ### reset delay calibration ###
+                                        self.simulator_timing_ok = False
+                                        self.accumulated_delay = 0.0
+                                        ### output error logs ###
                                         traceback.print_exc()
                                         print(partial)
                                         print("######## skip broken packets ########")
@@ -240,18 +268,32 @@ class RaceClient:
             image = np.asarray(image)
 
             ### interval counter
+            interval = 0.05 # initialize
             self.current_image_received_time = time.time()
             if self.last_image_received_time is None:
+                q = {'data': image, 'time':time.time(), 'delay': 0.0}
                 print(f'receive image: {self.current_image_received_time:10.7f}')
                 self.last_fps_time = time.time()
             else:
                 interval = self.current_image_received_time - self.last_image_received_time
+
+                if not self.simulator_timing_ok:
+                    ### simulator interval calibration ###
+                    if interval < 0.0505 and interval >= 0.04995:
+                        if self.last_interval < 0.0505 and self.last_interval >= 0.04995:
+                            self.simulator_timing_ok = True
+                else:
+                    ### accumulated delay ###
+                    self.accumulated_delay += interval - 0.05
+                self.last_interval = interval
+
+                q = {'data': image, 'time':time.time(), 'delay': self.accumulated_delay}
                 if interval <= 0.03 or interval >= 0.07:
                     print(f'receive image: {self.current_image_received_time:10.7f}, interval: {interval:.18f} - NG')
                     self.ng_frame_counter += 1
                 else:
-                    self.ok_frame_counter += 1
                     print(f'receive image: {self.current_image_received_time:10.7f}, interval: {interval:.18f}')
+                    self.ok_frame_counter += 1
             self.last_image_received_time = self.current_image_received_time
 
             ### fps counter
@@ -272,46 +314,89 @@ class RaceClient:
             if not self.image_queue.empty():
                 self.image_queue.get(block=False)
                 self.image_queue.task_done()
-                self.image_queue.put(image)
                 print("drop old image")
-            else:
-                self.image_queue.put(image)
+            self.image_queue.put(q)
             self.lock.release()
-        elif msg['msg_type'] == "cross_start":
-            print(f'cross_start: {msg}')
+        elif msg['msg_type'] == "collision_with_starting_line":
+            print(f'collision_with_starting_line: {msg}')
+            t = time.time()
+            if self.lap_start_time is None:
+                self.lap_start_time = t
+                self.lap_first_start_time = t
+            else:
+                self.lap_end_time = t
+                self.last_lap_time = t - self.lap_start_time
+                self.lap_start_time = t
+                is_best = False
+                if self.best_lap_time is None:
+                    self.best_lap_time = self.last_lap_time
+                elif self.last_lap_time < self.best_lap_time:
+                    self.best_lap_time = self.last_lap_time
+                    is_best = True
+                q = {'lap':self.lap_counter, 'lap_time': self.last_lap_time, 'best': is_best}
+                self.lap_time_queue.put(q)
+
+                self.lap_counter += 1
             return
 
 
     def run_model(self):
         if not self.image_queue.empty():
+            start_run_time = time.time()
             print(f'empty count: {self.count}')
             self.count = 0
             self.lock.acquire()
-            x = self.image_queue.get(block=False)
+            q = self.image_queue.get(block=False)
             self.lock.release()
+            x = q['data']
             x = self.model.preprocess(x)
+            start_time = time.time()
             [throttle, steering] = self.model.infer(x)
+            end_time = time.time()
+            print(f'prediction time: {end_time - start_time:10.7f}')
             self.image_queue.task_done()
 
             if throttle[0] > 0.95:
                 throttle[0] = 1.0
-            elif throttle[0] < 0:
+            elif throttle[0] < -1.0:
                 throttle[0] = -1.0
 
             # body color change
             color = self.color_make(throttle[0])
-            name = f'{self.name} {throttle[0]:0.2f}'
-            car_conf = {"body_style" : "donkey",
-                        "body_rgb" : color,
-                        "car_name" : name,
-                        "font_size" : 75}
+            left_arrow, right_arrow = self.lr_make(steering[0])
+            t = time.time()
+            if not self.simulator_timing_ok:
+                if t - self.lap_first_start_time <= 3.0: # 3.0s
+                    name = f'{self.name} START'
+                elif t - self.lap_end_time <= 3.0: # 3.0s
+                    name = f'{self.name} lap:{self.last_lap_time:0.2f})'
+                else:
+                    name = f'{self.name} delay calibrating'
+                car_conf = {"body_style" : "donkey", 
+                            "body_rgb" : color,
+                            "car_name" : name,
+                            "font_size" : 25}
+            else:
+                if t - self.lap_first_start_time <= 3.0: # 3.0s
+                    name = f'{left_arrow.rjust(3)}{self.name} START {throttle[0]:0.2f}{right_arrow.ljust(3)}'
+                elif t - self.lap_end_time <= 3.0: # 3.0s
+                    name = f'{left_arrow.rjust(3)}{self.name} lap:{self.last_lap_time:0.2f} {throttle[0]:0.2f}{right_arrow.ljust(3)}'
+                else:
+                    name = f'{left_arrow.rjust(3)}{self.name} {self.accumulated_delay:0.7f} {throttle[0]:0.2f}{right_arrow.ljust(3)}'
+                car_conf = {"body_style" : "donkey", 
+                            "body_rgb" : color,
+                            "car_name" : name,
+                            "font_size" : 25}
 
-            self.car_config_to_send_queue(conf=car_conf, delay=self.delay)
-            self.controls_to_send_queue(steering[0], throttle[0], delay=self.delay)
+            self.car_config_to_send_queue(conf=car_conf, delay=self.delay-q['delay'])
+            self.controls_to_send_queue(steering[0], throttle[0], delay=self.delay-q['delay'])
+            print(f"set delay: {self.delay-q['delay']}")
+            end_run_time = time.time()
+            print(f'run_model time: {end_run_time - start_run_time:10.7f}')
         else:
             self.count += 1
 
-    def color_make(self,value):
+    def color_make(self, value):
         """
         Rainbow color maker.
         value: -1.0 to 1.0
@@ -347,6 +432,52 @@ class RaceClient:
             color = (255,0,0) # red
 
         return color
+
+
+    def lr_make(self, value):
+        """
+        Rainbow color maker.
+        value: -1.0 to 1.0
+        abs(value) 0.0: blue
+        abs(value) 0.5: green
+        abs(value) 1.0: red
+        """
+        if value > 1:
+            value = 1
+        elif value < -1:
+            value = -1
+
+        left_arrow = '<'
+        right_arrow = '>'
+
+        if value < 0:
+            if value <= -0.7:
+                left_arrow = '<<<'
+                right_arrow = ''
+            elif value <= -0.3:
+                left_arrow = '<<'
+                right_arrow = ''
+            elif value <= -0.125:
+                left_arrow = '<'
+                right_arrow = ''
+            else:
+                left_arrow = '<'
+                right_arrow = '>'
+        elif value >= 0:
+            if value >= 0.7:
+                left_arrow = ''
+                right_arrow = '>>>'
+            elif value >= 0.3:
+                left_arrow = ''
+                right_arrow = '>>'
+            elif value >= 0.125:
+                left_arrow = ''
+                right_arrow = '>'
+            else:
+                left_arrow = '<'
+                right_arrow = '>'
+
+        return left_arrow, right_arrow
 
 
     def scene_config_to_send_queue(self, conf=None):
@@ -497,13 +628,82 @@ class TRTModel():
         #print(self.outputs)
         return [out.host_memory for out in self.outputs]
 
+class TFLiteModel():
+    def __init__(self, model_path):
+        self.interpreter = self.load_model(model_path)
+
+    def load_model(self, model_path):
+        import tensorflow as tf
+        print(f'Load model from {model_path}.')
+        interpreter = tf.lite.Interpreter(model_path)
+        interpreter.allocate_tensors()
+        self.input_details = interpreter.get_input_details()
+        self.output_details = interpreter.get_output_details()
+        return interpreter
+
+    def preprocess(self, image):
+        # image: rgb image
+
+        # RGB convert from [0, 255] to [0.0, 1.0]
+        x = image.astype(np.float32) / 255.0
+        # HWC to CHW format
+        #x = x.transpose((2, 0, 1)) # keras -> ONNX -> TRT8, don't need HWC to CHW. model inputs uses HWC.
+        # Flatten it to a 1D array.
+        #x = x.reshape(-1)
+        #x = x[None, :, :, :]
+        #x = x.ravel()
+        return x
+    
+    def infer2(self, x, batch_size=1):
+        outputs = self.my_signature(x=x)
+        print(outputs)
+    
+    def infer(self, x, batch_size=1):
+        self.interpreter.set_tensor(self.input_details[0]['index'], [x])
+        self.interpreter.invoke()
+        steering = self.interpreter.get_tensor(self.output_details[0]['index'])[0]
+        throttle = self.interpreter.get_tensor(self.output_details[1]['index'])[0]
+        #steering = outputs[0][0]
+        #throttle = outputs[1][0]
+        return [throttle, steering]
+
+class TFModel():
+    def __init__(self, model_path):
+        self.model = self.load_model(model_path)
+
+    def load_model(self, model_path):
+        import tensorflow.keras as keras
+        print(f'Load model from {model_path}.')
+        model = keras.models.load_model(model_path)
+
+        return model
+
+    def preprocess(self, image):
+        # image: rgb image
+
+        # RGB convert from [0, 255] to [0.0, 1.0]
+        x = image.astype(np.float32) / 255.0
+        # HWC to CHW format
+        #x = x.transpose((2, 0, 1)) # keras -> ONNX -> TRT8, don't need HWC to CHW. model inputs uses HWC.
+        # Flatten it to a 1D array.
+        #x = x.reshape(-1)
+        x = x[None, :, :, :]
+        #x = x.ravel()
+        return x
+    
+    def infer(self, x, batch_size=1):
+        outputs = self.model.predict(x)
+        steering = outputs[0][0]
+        throttle = outputs[1][0]
+        return [throttle, steering]
+
 
 def main(host, name, model_path, delay):
 
     car_conf = {"body_style" : "donkey", 
                 "body_rgb" : (255, 0, 0),
                 "car_name" : name,
-                "font_size" : 75}
+                "font_size" : 25}
 
     # ~/projects/gym-donkeycar/gym_donkeycar/envs/donkey_env.py
     # generated_road, warehouse, sparkfun_avc, generated_track, mountain_track, roboracingleague_1, waveshare, mini_monaco, warren, thunderhill, circuit_launch
@@ -531,7 +731,7 @@ def main(host, name, model_path, delay):
     try:
         while True:
             client.run_model()
-            time.sleep(0.01)
+            time.sleep(0.001)
     except KeyboardInterrupt:
         pass
     except:
