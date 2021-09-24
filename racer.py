@@ -5,6 +5,7 @@ Usage:
     racer.py (--host=<ip_address>) (--name=<car_name>) (--model=<model_path>) (--delay=<seconds>)
 Example:
     python racer.py --host=127.0.0.1 --name=naisy --model=linear.engine --delay=0.2
+
 Supported models:
     TensorRT 8:       linear.engine
     Tensorflow:       linear.h5
