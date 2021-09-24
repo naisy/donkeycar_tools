@@ -650,21 +650,14 @@ class TFLiteModel():
         #x = x.transpose((2, 0, 1)) # keras -> ONNX -> TRT8, don't need HWC to CHW. model inputs uses HWC.
         # Flatten it to a 1D array.
         #x = x.reshape(-1)
-        #x = x[None, :, :, :]
         #x = x.ravel()
         return x
-    
-    def infer2(self, x, batch_size=1):
-        outputs = self.my_signature(x=x)
-        print(outputs)
     
     def infer(self, x, batch_size=1):
         self.interpreter.set_tensor(self.input_details[0]['index'], [x])
         self.interpreter.invoke()
         steering = self.interpreter.get_tensor(self.output_details[0]['index'])[0]
         throttle = self.interpreter.get_tensor(self.output_details[1]['index'])[0]
-        #steering = outputs[0][0]
-        #throttle = outputs[1][0]
         return [throttle, steering]
 
 class TFModel():
