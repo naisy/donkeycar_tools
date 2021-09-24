@@ -10,9 +10,6 @@ Supported models:
     TensorRT 8:       linear.engine
     Tensorflow:       linear.h5
     Tensorflow Lite:  linear.tflite
-
-Options:
-    -h --help        Show this screen.
 """
 
 import socket
@@ -29,16 +26,8 @@ import numpy as np
 import queue as Queue
 import threading
 import re
-import tensorrt as trt
-import pycuda.driver as cuda
-import pycuda.autoinit
-from collections import namedtuple
 import traceback
 
-HostDeviceMemory = namedtuple('HostDeviceMemory', 'host_memory device_memory')
-TRT8 = 8
-TRT7 = 7
-TRT_LOGGER = trt.Logger()
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.NOTSET)  # NOTSET:0, DEBUG:10, INFO:20, WARNING:30, ERROR:40, CRITICAL:50
 
@@ -92,6 +81,7 @@ class RaceClient:
         elif model_path.endswith('.h5'):
             self.model = TFModel(model_path=model_path)
         elif model_path.endswith('.tflite'):
+            import tensorflow as tf
             self.model = TFLiteModel(model_path=model_path)
 
         # connect to unity simulator
@@ -634,7 +624,6 @@ class TFLiteModel():
         self.interpreter = self.load_model(model_path)
 
     def load_model(self, model_path):
-        import tensorflow as tf
         print(f'Load model from {model_path}.')
         interpreter = tf.lite.Interpreter(model_path)
         interpreter.allocate_tensors()
@@ -666,7 +655,6 @@ class TFModel():
         self.model = self.load_model(model_path)
 
     def load_model(self, model_path):
-        import tensorflow.keras as keras
         print(f'Load model from {model_path}.')
         model = keras.models.load_model(model_path)
 
@@ -686,9 +674,9 @@ class TFModel():
         return x
     
     def infer(self, x, batch_size=1):
-        outputs = self.model.predict(x)
-        steering = outputs[0][0]
-        throttle = outputs[1][0]
+        outputs = self.model(x, training=False)
+        steering = outputs[0][0].numpy() # EagerTensor to numpy
+        throttle = outputs[1][0].numpy()
         return [throttle, steering]
 
 
@@ -736,5 +724,25 @@ def main(host, name, model_path, delay):
 
 if __name__ == '__main__':
     args = docopt(__doc__)
+    if args['--model'].endswith('.engine'):
+        import tensorrt as trt
+        import pycuda.driver as cuda
+        import pycuda.autoinit
+        from collections import namedtuple
+        global HostDeviceMemory
+        global TRT8
+        global TRT7
+        global TRT_LOGGER
+        HostDeviceMemory = namedtuple('HostDeviceMemory', 'host_memory device_memory')
+        TRT8 = 8
+        TRT7 = 7
+        TRT_LOGGER = trt.Logger()
+
+    elif args['--model'].endswith('.h5'):
+        import tensorflow as tf
+        import tensorflow.keras as keras
+    elif args['--model'].endswith('.tflite'):
+        import tensorflow as tf
+
     main(host=args['--host'], name=args['--name'], model_path=args['--model'], delay=args['--delay'])
 
