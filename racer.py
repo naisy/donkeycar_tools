@@ -27,6 +27,7 @@ import queue as Queue
 import threading
 import re
 import traceback
+from pynput import keyboard
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.NOTSET)  # NOTSET:0, DEBUG:10, INFO:20, WARNING:30, ERROR:40, CRITICAL:50
@@ -90,6 +91,17 @@ class RaceClient:
         self.th = threading.Thread(target=self.read_socket, args=(self.sock,))
         self.th.start()
 
+        # keyboard listener
+        self.press_any_key = False
+        self.press_ctrl = False
+
+        self.listener = keyboard.Listener(
+            on_press=self.on_press,
+            on_release=self.on_release)
+        self.listener.start()
+        self.hotkeys = keyboard.GlobalHotKeys({
+                '<ctrl>+c':self.on_activate_ctrl_c})
+        self.hotkeys.start()
 
     def connect(self, host, port):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -125,6 +137,15 @@ class RaceClient:
             q = self.lap_time_queue.get(block=False)
             print(q)
             self.lap_time_queue.task_done()
+        try:
+            self.hotkeys.join()
+        except RuntimeError as e:
+            pass
+        try:
+            self.listener.join()
+        except RuntimeError as e:
+            pass
+        self.model.close()
 
 
     def replace_float_notation(self, string):
@@ -356,17 +377,16 @@ class RaceClient:
             color = self.color_make(throttle[0])
             left_arrow, right_arrow = self.lr_make(steering[0])
             t = time.time()
-            if not self.simulator_timing_ok:
+
+            if not self.press_any_key:
+                name = f'{left_arrow.rjust(3)}{self.name} press any key {throttle[0]:0.2f}{right_arrow.ljust(3)}'
+            elif not self.simulator_timing_ok:
                 if t - self.lap_first_start_time <= 3.0: # 3.0s
-                    name = f'{self.name} START'
+                    name = f'{left_arrow.rjust(3)}{self.name} START {throttle[0]:0.2f}{right_arrow.ljust(3)}'
                 elif t - self.lap_end_time <= 3.0: # 3.0s
                     name = f'{self.name} lap:{self.last_lap_time:0.2f})'
                 else:
-                    name = f'{self.name} delay calibrating'
-                car_conf = {"body_style" : "donkey", 
-                            "body_rgb" : color,
-                            "car_name" : name,
-                            "font_size" : 25}
+                    name = f'{left_arrow.rjust(3)}{self.name} delay calibrating {throttle[0]:0.2f}{right_arrow.ljust(3)}'
             else:
                 if t - self.lap_first_start_time <= 3.0: # 3.0s
                     name = f'{left_arrow.rjust(3)}{self.name} START {throttle[0]:0.2f}{right_arrow.ljust(3)}'
@@ -374,13 +394,14 @@ class RaceClient:
                     name = f'{left_arrow.rjust(3)}{self.name} lap:{self.last_lap_time:0.2f} {throttle[0]:0.2f}{right_arrow.ljust(3)}'
                 else:
                     name = f'{left_arrow.rjust(3)}{self.name} {self.accumulated_delay:0.7f} {throttle[0]:0.2f}{right_arrow.ljust(3)}'
-                car_conf = {"body_style" : "donkey", 
-                            "body_rgb" : color,
-                            "car_name" : name,
-                            "font_size" : 25}
+            car_conf = {"body_style" : "donkey", 
+                        "body_rgb" : color,
+                        "car_name" : name,
+                        "font_size" : 25}
 
             self.car_config_to_send_queue(conf=car_conf, delay=self.delay-q['delay'])
-            self.controls_to_send_queue(steering[0], throttle[0], delay=self.delay-q['delay'])
+            if self.press_any_key:
+                self.controls_to_send_queue(steering[0], throttle[0], delay=self.delay-q['delay'])
             print(f"set delay: {self.delay-q['delay']}")
             end_run_time = time.time()
             print(f'run_model time: {end_run_time - start_run_time:10.7f}')
@@ -538,6 +559,32 @@ class RaceClient:
         q = {'data':msg, 'time':time.time(), 'delay': delay}
         self.send_queue.put(q)
 
+    def on_press(self, key):
+        try:
+            self.press_any_key = True
+            print('alphanumeric key {0} pressed'.format(key.char))
+            if key.char == 'c' and self.press_ctrl:
+                print('<ctrl>+c pressed')
+                print('keyboard lister stopped')
+                raise KeyboardInterrupt()
+        except AttributeError:
+            print('special key {0} pressed'.format(key))
+            if key == keyboard.Key.ctrl:
+                self.press_ctrl = True
+
+    def on_release(self, key):
+        print('{0} released'.format(key))
+        if key == keyboard.Key.esc:
+            # Stop listener
+            return False
+        if key == keyboard.Key.ctrl:
+            self.press_ctrl = False
+
+    def on_activate_ctrl_c(self):
+        print('<ctlr>+c pressed')
+        print('hotkey listener stopped')
+        raise KeyboardInterrupt()
+
 
 class TRTModel():
 
@@ -555,6 +602,9 @@ class TRTModel():
         self.engine = self.load_engine(model_path)
         self.inputs, self.outputs, self.bindings, self.stream = self.allocate_buffers(self.engine)
         self.context = self.engine.create_execution_context()
+
+    def close(self):
+        self.context = None
 
     def load_engine(self, model_path):
         # load tensorrt model from file
@@ -620,8 +670,12 @@ class TRTModel():
         return [out.host_memory for out in self.outputs]
 
 class TFLiteModel():
+
     def __init__(self, model_path):
         self.interpreter = self.load_model(model_path)
+
+    def close(self):
+        return
 
     def load_model(self, model_path):
         print(f'Load model from {model_path}.')
@@ -651,8 +705,12 @@ class TFLiteModel():
         return [throttle, steering]
 
 class TFModel():
+
     def __init__(self, model_path):
         self.model = self.load_model(model_path)
+
+    def close(self):
+        return
 
     def load_model(self, model_path):
         print(f'Load model from {model_path}.')
