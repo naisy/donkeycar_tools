@@ -26,6 +26,6 @@ onnx.save(onnx_model, 'linear.onnx')
 # onnx to engine (sh command)
 ########################################
 import os
-command = f'/usr/src/tensorrt/bin/trtexec --onnx=linear.onnx --saveEngine=linear.engine --fp16 --shapes=img_in:1x120x160x3 --explicitBatch'
+command = f'/usr/src/tensorrt/bin/trtexec --onnx=linear.onnx --saveEngine=linear.engine --fp16 --shapes=img_in:1x90x160x3 --explicitBatch'
 os.system(command)
 
