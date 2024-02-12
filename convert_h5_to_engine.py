@@ -16,6 +16,10 @@ import onnx
 import tf2onnx.convert
 from tensorflow.keras.models import Model, load_model
 model = load_model('linear.h5')
+input = model.input
+output = model.output
+print(f'input: {input}')
+print(f'output: {output}')
 #model.save('linear.pb')
 
 onnx_model, _ = tf2onnx.convert.from_keras(model)
